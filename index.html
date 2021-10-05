@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html>
+	<head>
+		<meta charset="utf-8">
+		<title>FSK modem</title>
+		<style>
+			#received, html, body {
+				margin: 0;
+				height: 100%;
+				width: 100%;
+			}
+		</style>
+		<meta name="viewport" content="width=device-width, initial-scale=1">
+	</head>
+	<body>
+		<textarea id="received"></textarea>
+		<script type="module" src="modem.js"></script>
+		<script type="module">
+			import { FskDemodulatorNode } from './modem.js';
+
+			const messageHandler = x => {
+				if (x.length < 3) {
+					return;
+				}
+				console.log(x);
+				let newLine;
+				try {
+					newLine = new TextDecoder().decode(x);
+				} catch (e) {
+					return;
+				}
+				let node = document.querySelector("#received");
+				let lines = node.value.split("\n");
+				lines.unshift(newLine);
+				console.log(lines);
+				while (lines.length > 10) {
+					lines.pop();
+				}
+				node.value = lines.join("\n");
+			}
+
+			const handleSuccess = async function(stream) {
+				const context = new AudioContext();
+				await context.audioWorklet.addModule('modem-worklet.js');
+				const source = context.createMediaStreamSource(stream);
+				const demodNode = new FskDemodulatorNode(context, 'bell103', messageHandler);
+
+				source.connect(demodNode);
+			};
+
+			navigator.mediaDevices.getUserMedia({ audio: true, video: false }).then(handleSuccess);
+		</script>
+	</body>
+</html>
