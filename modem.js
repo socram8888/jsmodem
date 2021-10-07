@@ -15,6 +15,63 @@ const MODE_REGISTRY = {
 	},
 }
 
+export class FskModulatorNode extends AudioWorkletNode {
+	constructor(context, mode) {
+		super(context, 'fsk-modulator', {
+			numberOfInputs: 0,
+			numberOfOutputs: 1,
+			channelCount: 1,
+			channelCountMode: 'explicit',
+		});
+
+		const modeConfig = MODE_REGISTRY[mode];
+		if (!modeConfig) {
+			throw new Exception(`Invalid mode ${mode}`);
+		}
+
+		this.nextMessageId = 0;
+		this.promises = {};
+
+		this.port.onmessage = event => {
+			// Call resolve function for associated message id
+			const data = event.data;
+			promises[data.id]();
+			delete promises[data.id];
+		}
+
+		this.port.start();
+		this.port.postMessage({
+			config: modeConfig
+		});
+	}
+
+	async transmit(blob) {
+		return new Promise((resolve, reject) => {
+			// Check data is a byte array (or can be converted into one)
+			let bytes;
+			try {
+				bytes = new Uint8Array(blob);
+			} catch (e) {
+				reject(e);
+				return;
+			}
+
+			// Get current valid message id and increment it
+			const messageId = this.nextMessageId;
+			this.nextMessageId++;
+
+			// Store success callback in the object property
+			this.promises[messageId] = resolve;
+
+			// Issue transmission request
+			this.port.postMessage({
+				id: this.messageId++,
+				bytes: bytes
+			});
+		});
+	}
+}
+
 export class FskDemodulatorNode extends AudioWorkletNode {
 	constructor(context, mode, handler) {
 		super(context, 'fsk-demodulator', {
