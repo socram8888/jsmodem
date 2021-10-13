@@ -1,7 +1,7 @@
 
 import { FskModulatorNode, FskDemodulatorNode } from './modem.js';
 
-function numpad(what, len) {
+function numPad(what, len) {
 	what = String(what);
 	while (what.length < len) {
 		what = "0" + what;
@@ -22,7 +22,7 @@ const messageHandler = x => {
 		return;
 	}
 
-	const match = newLine.match(/^([A-Za-z0-9-]): (.*)$/);
+	const match = newLine.match(/^([A-Za-z0-9-]+): (.*)$/);
 	if (!match) {
 		return;
 	}
