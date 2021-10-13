@@ -1,5 +1,6 @@
 
-import { FskModulatorNode, FskDemodulatorNode } from './modem.js';
+import { FskModulatorNode } from './modem/modulator.js';
+import { FskDemodulatorNode } from './modem/demodulator.js';
 
 function numPad(what, len) {
 	what = String(what);
@@ -51,7 +52,7 @@ const messageHandler = x => {
 
 const handleSuccess = async function(stream) {
 	const context = new AudioContext();
-	await context.audioWorklet.addModule('modem-worklet.js');
+	await context.audioWorklet.addModule('modem/demodulator-worklet.js');
 	const source = context.createMediaStreamSource(stream);
 	const demodNode = new FskDemodulatorNode({
 		context: context,
@@ -90,7 +91,7 @@ function sendMessage() {
 
 	if (outputContext == null) {
 		let ctx = new AudioContext();
-		ctx.audioWorklet.addModule('modem-worklet.js').then(() => {
+		ctx.audioWorklet.addModule('modem/modulator-worklet.js').then(() => {
 			outputContext = ctx;
 			startTransmission();
 		});
