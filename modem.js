@@ -16,87 +16,74 @@ const MODE_REGISTRY = {
 }
 
 export class FskModulatorNode extends AudioWorkletNode {
-	constructor(context, mode) {
-		super(context, 'fsk-modulator', {
+	constructor(params) {
+		if (!params.context) {
+			throw new Error("No context given");
+		}
+
+		const fskParams = MODE_REGISTRY[params.mode];
+		if (!fskParams) {
+			throw new Error(`Invalid mode ${mode}`);
+		}
+
+		const data = params.data;
+		if (!data) {
+			throw new Error("No data to send");
+		}
+		const bytes = new Uint8Array(data);
+
+		super(params.context, 'fsk-modulator', {
 			numberOfInputs: 0,
 			numberOfOutputs: 1,
 			channelCount: 1,
 			channelCountMode: 'explicit',
 		});
 
-		const modeConfig = MODE_REGISTRY[mode];
-		if (!modeConfig) {
-			throw new Exception(`Invalid mode ${mode}`);
-		}
-
-		this.nextMessageId = 0;
-		this.promises = {};
-
 		this.port.onmessage = event => {
-			// Call resolve function for associated message id
-			const data = event.data;
-			this.promises[data.id]();
-			delete this.promises[data.id];
+			if (params.onfinished) {
+				params.onfinished();
+			}
 		}
 
 		this.port.start();
 		this.port.postMessage({
-			config: {
-				baud: modeConfig.baud,
-				space: modeConfig.space,
-				mark: modeConfig.mark,
-				// TODO: make this configurable
-				preamble: 0.5,
-				tail: 0.2,
-			}
-		});
-	}
-
-	async transmit(blob) {
-		return new Promise((resolve, reject) => {
-			// Check data is a byte array (or can be converted into one)
-			let bytes;
-			try {
-				bytes = new Uint8Array(blob);
-			} catch (e) {
-				reject(e);
-				return;
-			}
-
-			// Get current valid message id and increment it
-			const messageId = this.nextMessageId;
-			this.nextMessageId++;
-
-			// Store success callback in the object property
-			this.promises[messageId] = resolve;
-
-			// Issue transmission request
-			this.port.postMessage({
-				id: messageId,
-				bytes: bytes
-			});
+			fskParams: fskParams,
+			bytes: bytes,
+			preamble: params.preamble || 1,
+			tail: params.tail || 0.5,
 		});
 	}
 }
 
 export class FskDemodulatorNode extends AudioWorkletNode {
-	constructor(context, mode, handler) {
-		super(context, 'fsk-demodulator', {
+	constructor(params) {
+		if (!params.context) {
+			console.log(params);
+			throw new Error("No context given");
+		}
+
+		const fskParams = MODE_REGISTRY[params.mode];
+		if (!fskParams) {
+			throw new Error(`Invalid mode ${mode}`);
+		}
+
+		super(params.context, 'fsk-demodulator', {
 			numberOfInputs: 1,
 			numberOfOutputs: 0,
 			channelCount: 1,
 			channelCountMode: 'explicit',
 		});
 
-		const modeConfig = MODE_REGISTRY[mode];
-		if (!modeConfig) {
-			throw new Exception(`Invalid mode ${mode}`);
-		}
+		this.onmessage = params.onmessage;
 
 		this.port.onmessage = event => {
-			handler(event.data);
+			if (this.onmessage) {
+				this.onmessage(event.data);
+			}
 		}
 		this.port.start();
-		this.port.postMessage(modeConfig);
+		this.port.postMessage({
+			fskParams: fskParams
+		});
 	}
 }

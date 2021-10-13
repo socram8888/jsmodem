@@ -1,157 +1,101 @@
 'use strict';
 
-class UartTransmitter {
-	constructor(port, config) {
-		this.port = port;
+class FskModulatorProcessor extends AudioWorkletProcessor {
+	constructor() {
+		super();
 
-		// FIFO for messages to be send
-		this.queue = new Array();
+		this.params = null;
 
-		// Preamble and tail
-		this.preamble = 0;
-		this.tail = 0;
-	}
+		// Initialize counters
+		this.sampleCount = 0;
+		this.symbolCount = 0;
+		this.currentPhase = 0;
 
-	schedule(id, bytes) {
-		this.queue.push({
-			id: id,
-			bytes: bytes
-		});
+		// Flag that will be set once the tail has been sent
+		this.tailSent = false;
+
+		// Flag that will be set once we've notified the node via the port that we're done
+		this.notifiedNode = false;
+
+		// Setup message callback
+		this.port.onmessage = msg => {
+			this.params = msg.data;
+
+			// Precalculate some often used values
+			this.spacePhaseDelta = 2 * Math.PI * this.params.fskParams.space / sampleRate;
+			this.markPhaseDelta = 2 * Math.PI * this.params.fskParams.mark / sampleRate;
+			this.samplesPerBit = sampleRate / this.params.fskParams.baud;
+
+			// Emit preamble
+			this.currentPhaseDelta = this.markPhaseDelta;
+			this.symbolEnd = this.params.preamble * sampleRate;
+
+		}
+		this.port.start();
 	}
 
 	nextSymbol() {
-		// If no transmission is going on...
-		if (!this.current) {
-			// Attempt to extract a queued one
-			this.current = this.queue.shift();
-
-			// If it failed, abort
-			if (!this.current) {
-				return null;
+		// If the tail has been sent already, we're done
+		if (this.tailSent) {
+			// If the node hasn't been notified yet, do so now
+			if (!this.notifiedNode) {
+				this.port.postMessage({
+					done: true
+				});
+				this.notifiedNode = true;
 			}
 
-			// Prepare new transmission
-			this.symbolCount = 0;
-
-			// Execute preamble
-			return 'preamble';
+			return false;
 		}
 
 		/*
-		 * Calculate byte and bit index.
+		 * Calculate byte index.
 		 *
 		 * We have to divide by 10 because for every 8-bit byte we also have to send one start
 		 * bit and one stop bit.
 		 */
 		const byteIdx = (this.symbolCount / 10) | 0;
-		const bitIdx = this.symbolCount % 10 - 1;
 
-		// If we reached the end of the current message
-		if (byteIdx >= this.current.bytes.length) {
-			// Notify remote we're done with this message
-			this.port.postMessage({
-				id: this.current.id
-			});
+		// If we haven't reached yet the end of the current message...
+		if (byteIdx < this.params.bytes.length) {
+			// Extract bit
+			const bitIdx = this.symbolCount % 10 - 1;
+			let symbol;
 
-			// Reset current (so in next iteration a new one is pulled from the FIFO)
-			this.current = null;
+			switch (bitIdx) {
+				case -1:
+					// Send start bit
+					symbol = 0;
+					break;
 
-			// Then execute tail
-			return 'tail';
-		}
+				default:
+					// Extract actual bit
+					symbol = (this.params.bytes[byteIdx] >> bitIdx) & 1;
+					break;
 
-		let symbol;
-		switch (bitIdx) {
-			case -1:
-				// Execute start bit
-				symbol = 0;
-				break;
-
-			default:
-				// Extract actual bit
-				symbol = (this.current.bytes[byteIdx] >> bitIdx) & 1;
-				break;
-
-			case 8:
-				// Execute stop bit
-				symbol = 1;
-				break;
-		}
-
-		// Increment symbol position
-		this.symbolCount++;
-
-		return symbol ? 'mark' : 'space';
-	}
-}
-
-class FskModulatorProcessor extends AudioWorkletProcessor {
-	constructor() {
-		super();
-
-		this.config = null;
-		this.transmitter = new UartTransmitter(this.port);
-
-		this.currentSample = 0;
-		this.symbolEnd = 0;
-		this.currentPhase = 0;
-
-		this.port.onmessage = msg => {
-			const data = msg.data;
-			if (data.config) {
-				this.configure(data.config);
+				case 8:
+					// Send stop bit
+					symbol = 1;
+					break;
 			}
-			if (this.transmitter && data.bytes) {
-				this.transmitter.schedule(data.id, data.bytes);
-			}
+
+			this.currentPhaseDelta = symbol ? this.markPhaseDelta : this.spacePhaseDelta;
+			this.symbolEnd += this.samplesPerBit;
+			this.symbolCount++;
+
+			return true;
 		}
-		this.port.start();
-	}
 
-	configure(config) {
-		this.config = config;
-
-		this.spacePhaseDelta = 2 * Math.PI * config.space / sampleRate;
-		this.markPhaseDelta = 2 * Math.PI * config.mark / sampleRate;
-		this.bitSamples = sampleRate / this.config.baud;
-	}
-
-	nextSymbol() {
-		switch (this.transmitter.nextSymbol()) {
-			case 'preamble':
-				this.currentSample = 0;
-				this.currentPhaseDelta = this.markPhaseDelta;
-				this.symbolEnd = this.config.preamble * sampleRate;
-				return true;
-
-			case 'space':
-				this.currentPhaseDelta = this.spacePhaseDelta;
-				this.symbolEnd += this.bitSamples;
-				return true;
-
-			case 'mark':
-				this.currentPhaseDelta = this.markPhaseDelta;
-				this.symbolEnd += this.bitSamples;
-				return true;
-
-			case 'tail':
-				this.currentPhaseDelta = this.markPhaseDelta;
-				this.symbolEnd += this.config.tail * sampleRate;
-				return true;
-
-			default:
-				/*
-				 * Reset phase so after the gap without messages, the next one's signal starts at
-				 * zero.
-				 */
-				this.currentPhase = 0;
-				return false;
-		}
+		// If transmission is over, send tail
+		this.currentPhaseDelta = this.markPhaseDelta;
+		this.symbolEnd += this.params.tail * sampleRate;
+		this.tailSent = true;
+		return true;
 	}
 
 	process(inputs, outputs, parameters) {
 		// If hasn't been initialized yet, return
-		if (!this.config) {
+		if (!this.params) {
 			return true;
 		}
 
@@ -164,10 +108,10 @@ class FskModulatorProcessor extends AudioWorkletProcessor {
 		let outputPos = 0;
 
 		while (outputPos < output.length) {
-			if (this.currentSample >= this.symbolEnd) {
-				// Attempt to fetch next symbol
+			if (this.sampleCount >= this.symbolEnd) {
+				// If nextSymbol returns false, we're done and we can be garbage collected
 				if (!this.nextSymbol()) {
-					return true;
+					return false;
 				}
 			}
 
@@ -181,8 +125,8 @@ class FskModulatorProcessor extends AudioWorkletProcessor {
 				this.currentPhase -= Math.PI * 2;
 			}
 
-			// Step current sample counter
-			this.currentSample++;
+			// Step sample counter
+			this.sampleCount++;
 		}
 
 		return true;
@@ -198,9 +142,15 @@ class UartReceiver {
 		this.bytes = new Array();
 		this.symbolCount = 0;
 		this.symbolBuffer = 0;
+
+		this.startTime = null;
 	}
 
 	feedBit(bit) {
+		if (this.symbolCount == 0 && this.bytes.length == 0) {
+			this.startTime = new Date();
+		}
+
 		// Feed bit into buffer
 		this.symbolBuffer = bit << 9 | this.symbolBuffer >> 1;
 		this.symbolCount++;
@@ -223,20 +173,25 @@ class UartReceiver {
 				 * We won't reset the symbol count, as this might happen not only in case of
 				 * synchronization loss but also if the message is in the lead-in.
 				 */
-				if (this.bytes.length > 0) {
-					this.port.postMessage(new Uint8Array(this.bytes));
-				}
-				this.bytes = new Array();
+				this.messageOver();
 			}
 		}
 	}
 
 	rxFail() {
+		this.messageOver();
+		this.symbolCount = 0;
+	}
+
+	messageOver() {
 		if (this.bytes.length > 0) {
-			this.port.postMessage(new Uint8Array(this.bytes));
+			this.port.postMessage({
+				bytes: new Uint8Array(this.bytes),
+				start: this.startTime,
+				end: new Date()
+			});
 		}
 		this.bytes = new Array();
-		this.symbolCount = 0;
 	}
 }
 
@@ -247,37 +202,50 @@ class FskDemodulatorProcessor extends AudioWorkletProcessor {
 	constructor() {
 		super();
 
-		this.config = null;
+		this.params = null;
 		this.receiver = new UartReceiver(this.port);
 
 		this.port.onmessage = msg => {
-			this.configure(msg.data);
+			this.params = msg.data;
+
+			// Precalculate some often used values
+			this.bitsPerSample = this.params.fskParams.baud / sampleRate;
+
+			/**
+			 * Set if output of the correlator should be inverted.
+			 *
+			 * The correlator sum's sign indicates if the frequency is leaning towards the lower
+			 * frequency (negative sum) or high frequency (positive sum).
+			 *
+			 * If we assume the space's frequency is lower than the mark's, a negative indicates a
+			 * binary 0 and a positive indicates a binary 1.
+			 *
+			 * However, if the space's frequency is higher than the mark's, the above logic needs to
+			 * be inverted. This flag marks that.
+			 */
+			this.invertCorr = this.params.fskParams.space > this.params.fskParams.mark;
+
+			// Delay line, large enough to hold the optimal delay
+			const delaySize = Math.round(this.params.fskParams.rxDelay * sampleRate) - 1;
+			this.delay = new Int8Array(delaySize);
+			this.delayPos = 0;
+
+			// Instantiate correlator buffer
+			const corSize = Math.round(this.CORR_RATIO * sampleRate / this.params.fskParams.baud);
+			this.correlator = new Int8Array(corSize);
+			this.corrPos = 0;
+			this.corrSum = 0;
+
+			// No bits have been emitted yet
+			this.previousBit = null;
+			this.emittedBits = 0;
 		}
 		this.port.start();
 	}
 
-	configure(config) {
-		this.config = config;
-
-		// Delay line, large enough to hold the optimal delay
-		const delaySize = Math.round(this.config.rxDelay * sampleRate) - 1;
-		this.delay = new Int8Array(delaySize);
-		this.delayPos = 0;
-
-		// Instantiate correlator buffer
-		const corSize = Math.round(this.CORR_RATIO * sampleRate / this.config.baud);
-		this.correlator = new Int8Array(corSize);
-		this.corrPos = 0;
-		this.corrSum = 0;
-
-		// No bits have been emitted yet
-		this.previousBit = null;
-		this.emittedBits = 0;
-	}
-
 	process(inputs, outputs, parameters) {
 		// If hasn't been initialized yet, return
-		if (!this.config) {
+		if (!this.params) {
 			return true;
 		}
 
@@ -306,13 +274,13 @@ class FskDemodulatorProcessor extends AudioWorkletProcessor {
 			this.correlator[this.corrPos] = newCorrPolarity;
 			this.corrPos = (this.corrPos + 1) % this.correlator.length;
 
-			// Current bit should be inverted if zero frequency is higher than one's
-			let currentBit = (this.corrSum >= 0) ^ (this.config.space > this.config.mark);
+			// Calculate current bit value
+			let currentBit = (this.corrSum >= 0) ^ this.invertCorr;
 
 			if (currentBit == this.previousBit) {
 				// Cast to int to floor it
 				const previousEmitted = this.emittedBits | 0;
-				this.emittedBits += this.config.baud / sampleRate;
+				this.emittedBits += this.bitsPerSample;
 				const newEmitted = this.emittedBits | 0;
 
 				// If we have received a new full bit, feed it

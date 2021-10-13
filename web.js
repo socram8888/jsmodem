@@ -9,20 +9,21 @@ function numPad(what, len) {
 	return what;
 }
 
-function timestamp() {
-	const now = new Date();
-	return numPad(now.getHours(), 2) + ":" + numPad(now.getMinutes(), 2) + ":" + numPad(now.getSeconds(), 2);
+function timestamp(date) {
+	return numPad(date.getHours(), 2) + ":" + numPad(date.getMinutes(), 2) + ":" + numPad(date.getSeconds(), 2);
 }
+
+let lastReceived = null;
 
 const messageHandler = x => {
 	let newLine;
 	try {
-		newLine = new TextDecoder('utf-8').decode(x);
+		newLine = new TextDecoder('utf-8').decode(x.bytes);
 	} catch (e) {
 		return;
 	}
 
-	const match = newLine.match(/^([A-Za-z0-9-]+): (.*)$/);
+	const match = newLine.match(/^([A-Za-z0-9-]+): (.+)/);
 	if (!match) {
 		return;
 	}
@@ -33,7 +34,7 @@ const messageHandler = x => {
 
 	const timeDiv = document.createElement("div");
 	timeDiv.className = "timestamp";
-	timeDiv.innerText = timestamp();
+	timeDiv.innerText = timestamp(x.start);
 
 	const textDiv = document.createElement("div");
 	textDiv.className = "text";
@@ -52,32 +53,51 @@ const handleSuccess = async function(stream) {
 	const context = new AudioContext();
 	await context.audioWorklet.addModule('modem-worklet.js');
 	const source = context.createMediaStreamSource(stream);
-	const demodNode = new FskDemodulatorNode(context, 'bell103', messageHandler);
+	const demodNode = new FskDemodulatorNode({
+		context: context,
+		mode: 'bell103',
+		onmessage: messageHandler
+	});
 
 	source.connect(demodNode);
 };
 
 navigator.mediaDevices.getUserMedia({ audio: true, video: false }).then(handleSuccess);
 
-const initOutput = async function() {
-	let outputContext = new AudioContext();
-	await outputContext.audioWorklet.addModule('modem-worklet.js');
+const sendInput = document.getElementById("sendinput");
+const sendButton = document.getElementById("sendbtt");
+let outputContext = null;
 
-	const modNode = new FskModulatorNode(outputContext, 'bell103');
-	modNode.connect(outputContext.destination)
+function startTransmission() {
+	const lineBytes = new TextEncoder('utf-8').encode('Test: ' + sendInput.value);
 
-	const sendButton = document.getElementById("sendbtt");
-	const sendInput = document.getElementById("sendinput");
-	sendButton.addEventListener('click', function(e) {
-		sendInput.disabled = true;
-		sendButton.disabled = true;
-
-		const lineBytes = new TextEncoder('utf-8').encode('Test: ' + sendInput.value);
-		modNode.transmit(lineBytes).then(() => {
+	const modNode = new FskModulatorNode({
+		context: outputContext,
+		mode: 'bell103',
+		data: lineBytes,
+		onfinished: () => {
+			sendInput.value = '';
 			sendInput.disabled = false;
 			sendButton.disabled = false;
-		});
-	}, false);
+		}
+	});
+	modNode.connect(outputContext.destination)
 }
 
-initOutput();
+function sendMessage() {
+	sendInput.disabled = true;
+	sendButton.disabled = true;
+
+	if (outputContext == null) {
+		let ctx = new AudioContext();
+		ctx.audioWorklet.addModule('modem-worklet.js').then(() => {
+			outputContext = ctx;
+			startTransmission();
+		});
+	} else {
+		startTransmission();
+	}
+}
+
+sendInput.onsubmit = () => sendMessage();
+sendButton.onclick = () => sendMessage();
