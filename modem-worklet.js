@@ -1,5 +1,196 @@
 'use strict';
 
+class UartTransmitter {
+	constructor(port, config) {
+		this.port = port;
+
+		// FIFO for messages to be send
+		this.queue = new Array();
+
+		// Preamble and tail
+		this.preamble = 0;
+		this.tail = 0;
+	}
+
+	schedule(id, bytes) {
+		this.queue.push({
+			id: id,
+			bytes: bytes
+		});
+	}
+
+	nextSymbol() {
+		// If no transmission is going on...
+		if (!this.current) {
+			// Attempt to extract a queued one
+			this.current = this.queue.shift();
+
+			// If it failed, abort
+			if (!this.current) {
+				return null;
+			}
+
+			// Prepare new transmission
+			this.symbolCount = 0;
+
+			// Execute preamble
+			return 'preamble';
+		}
+
+		/*
+		 * Calculate byte and bit index.
+		 *
+		 * We have to divide by 10 because for every 8-bit byte we also have to send one start
+		 * bit and one stop bit.
+		 */
+		const byteIdx = (this.symbolCount / 10) | 0;
+		const bitIdx = this.symbolCount % 10 - 1;
+
+		// If we reached the end of the current message
+		if (byteIdx >= this.current.bytes.length) {
+			// Notify remote we're done with this message
+			this.port.postMessage({
+				id: this.current.id
+			});
+
+			// Reset current (so in next iteration a new one is pulled from the FIFO)
+			this.current = null;
+
+			// Then execute tail
+			return 'tail';
+		}
+
+		let symbol;
+		switch (bitIdx) {
+			case -1:
+				// Execute start bit
+				symbol = 0;
+				break;
+
+			default:
+				// Extract actual bit
+				symbol = (this.current.bytes[this.bytePtr] >> bitIdx) & 1;
+				break;
+
+			case 8:
+				// Execute stop bit
+				symbol = 1;
+				break;
+		}
+
+		// Increment symbol position
+		this.symbolCount++;
+
+		return symbol ? 'mark' : 'space';
+	}
+}
+
+class FskModulatorProcessor extends AudioWorkletProcessor {
+	constructor() {
+		super();
+
+		this.config = null;
+		this.transmitter = new UartTransmitter(this.port);
+
+		this.currentSample = 0;
+		this.symbolEnd = 0;
+		this.currentPhase = 0;
+
+		this.port.onmessage = msg => {
+			const data = msg.data;
+			if (data.config) {
+				this.configure(data.config);
+			}
+			if (this.transmitter && data.bytes) {
+				this.transmitter.schedule(data.id, data.bytes);
+			}
+		}
+		this.port.start();
+	}
+
+	configure(config) {
+		this.config = config;
+
+		this.spacePhaseDelta = 2 * Math.PI * config.space / sampleRate;
+		this.markPhaseDelta = 2 * Math.PI * config.mark / sampleRate;
+		this.bitSamples = sampleRate / this.config.baud;
+	}
+
+	nextSymbol() {
+		switch (this.transmitter.nextSymbol()) {
+			case 'preamble':
+				this.currentSample = 0;
+				this.currentPhaseDelta = this.markPhaseDelta;
+				this.symbolEnd = this.config.preamble * sampleRate;
+				return true;
+
+			case 'space':
+				this.currentPhaseDelta = this.spacePhaseDelta;
+				this.symbolEnd += this.bitSamples;
+				return true;
+
+			case 'mark':
+				this.currentPhaseDelta = this.markPhaseDelta;
+				this.symbolEnd += this.bitSamples;
+				return true;
+
+			case 'tail':
+				this.currentPhaseDelta = this.markPhaseDelta;
+				this.symbolEnd += this.config.tail * sampleRate;
+				return true;
+
+			default:
+				/*
+				 * Reset phase so after the gap without messages, the next one's signal starts at
+				 * zero.
+				 */
+				this.currentPhase = 0;
+				return false;
+		}
+	}
+
+	process(inputs, outputs, parameters) {
+		// If hasn't been initialized yet, return
+		if (!this.config) {
+			return true;
+		}
+
+		// Might happen if called before connecting the output
+		if (!outputs || !outputs[0] || !outputs[0][0]) {
+			return true;
+		}
+
+		const output = outputs[0][0];
+		let outputPos = 0;
+
+		while (outputPos < output.length) {
+			if (this.currentSample >= this.symbolEnd) {
+				// Attempt to fetch next symbol
+				if (!this.nextSymbol()) {
+					return true;
+				}
+			}
+
+			// Generate actual sample
+			output[outputPos] = Math.sin(this.currentPhase);
+			outputPos++;
+
+			// Increment phase, capped at 2pi to reduce precision loss
+			this.currentPhase += this.currentPhaseDelta;
+			if (this.currentPhase > Math.PI * 2) {
+				this.currentPhase -= Math.PI * 2;
+			}
+
+			// Step current sample counter
+			this.currentSample++;
+		}
+
+		return true;
+	}
+}
+
+registerProcessor('fsk-modulator', FskModulatorProcessor)
+
 class UartReceiver {
 	constructor(port) {
 		this.port = port;
@@ -49,7 +240,7 @@ class UartReceiver {
 	}
 }
 
-export class FskDemodulatorProcessor extends AudioWorkletProcessor {
+class FskDemodulatorProcessor extends AudioWorkletProcessor {
 	// Experimentally determined to give the best results in noisy environments
 	CORR_RATIO = 6 / 8;
 
@@ -57,9 +248,9 @@ export class FskDemodulatorProcessor extends AudioWorkletProcessor {
 		super();
 
 		this.config = null;
+		this.receiver = new UartReceiver(this.port);
 
 		this.port.onmessage = msg => {
-			console.log("Config!", msg.data);
 			this.configure(msg.data);
 		}
 		this.port.start();
@@ -82,8 +273,6 @@ export class FskDemodulatorProcessor extends AudioWorkletProcessor {
 		// No bits have been emitted yet
 		this.previousBit = null;
 		this.emittedBits = 0;
-
-		this.receiver = new UartReceiver(this.port);
 	}
 
 	process(inputs, outputs, parameters) {

@@ -35,13 +35,20 @@ export class FskModulatorNode extends AudioWorkletNode {
 		this.port.onmessage = event => {
 			// Call resolve function for associated message id
 			const data = event.data;
-			promises[data.id]();
-			delete promises[data.id];
+			this.promises[data.id]();
+			delete this.promises[data.id];
 		}
 
 		this.port.start();
 		this.port.postMessage({
-			config: modeConfig
+			config: {
+				baud: modeConfig.baud,
+				space: modeConfig.space,
+				mark: modeConfig.mark,
+				// TODO: make this configurable
+				preamble: 1,
+				tail: 0.2,
+			}
 		});
 	}
 
@@ -65,7 +72,7 @@ export class FskModulatorNode extends AudioWorkletNode {
 
 			// Issue transmission request
 			this.port.postMessage({
-				id: this.messageId++,
+				id: messageId,
 				bytes: bytes
 			});
 		});
