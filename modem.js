@@ -46,7 +46,7 @@ export class FskModulatorNode extends AudioWorkletNode {
 				space: modeConfig.space,
 				mark: modeConfig.mark,
 				// TODO: make this configurable
-				preamble: 1,
+				preamble: 0.5,
 				tail: 0.2,
 			}
 		});

@@ -69,7 +69,7 @@ class UartTransmitter {
 
 			default:
 				// Extract actual bit
-				symbol = (this.current.bytes[this.bytePtr] >> bitIdx) & 1;
+				symbol = (this.current.bytes[byteIdx] >> bitIdx) & 1;
 				break;
 
 			case 8:
